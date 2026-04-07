@@ -332,7 +332,7 @@ async function confirmPreviewTemplate() {
       throw new Error(payload.error || "No se pudo aplicar la semana recurrente.");
     }
 
-    closePreviewModal();
+    closePreviewModal(true);
     await loadWeek();
     setBanner(
       `Semana recurrente actualizada. Series recreadas: ${payload.createdCount ?? 0}.`,
