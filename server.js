@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const path = require("path");
 const express = require("express");
 const session = require("express-session");
 const dotenv = require("dotenv");
@@ -17,6 +18,7 @@ dotenv.config();
 const app = express();
 
 const PORT = Number(process.env.PORT) || 3000;
+const PUBLIC_DIR = path.join(__dirname, "public");
 const TIMEZONE = process.env.TIMEZONE || "America/Argentina/Buenos_Aires";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -73,7 +75,7 @@ app.use(
     }
   })
 );
-app.use(express.static("public"));
+app.use(express.static(PUBLIC_DIR));
 
 app.get("/api/auth/status", async (req, res) => {
   try {
@@ -194,7 +196,7 @@ app.get("/api/week-events", async (req, res) => {
 });
 
 app.get("*", (_req, res) => {
-  res.sendFile("index.html", { root: "public" });
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
 });
 
 app.use((error, _req, res, _next) => {
