@@ -5,6 +5,7 @@ const state = {
   isAuthenticated: false,
   isConfigured: true
 };
+let currentTimeIndicatorInterval = null;
 
 const headerDays = document.getElementById("header-days");
 const rangeTitle = document.getElementById("range-title");
@@ -27,6 +28,7 @@ logoutButton.addEventListener("click", logout);
 boot();
 
 async function boot() {
+  ensureCurrentTimeIndicatorInterval();
   showBannerFromQuery();
   await loadAuthStatus();
 
@@ -152,6 +154,7 @@ function renderWeek(data) {
   renderHeader(data);
   renderAllDayBand(data);
   renderTimeGrid(data);
+  renderCurrentTimeIndicator();
 }
 
 function renderHeader(data) {
@@ -221,6 +224,7 @@ function renderTimeGrid(data) {
   const eventsByDay = groupByDay(data.timedEvents);
   for (const day of data.days) {
     const dayColumn = gridColumnTemplate.content.firstElementChild.cloneNode(true);
+    dayColumn.dataset.isoDate = day.isoDate;
     const eventsLayer = dayColumn.querySelector(".events-layer");
     const events = eventsByDay.get(day.index) || [];
 
@@ -254,6 +258,44 @@ function renderTimeGrid(data) {
     empty.textContent = "No hay eventos con horario en esta semana.";
     calendarGrid.appendChild(empty);
   }
+}
+
+function ensureCurrentTimeIndicatorInterval() {
+  if (currentTimeIndicatorInterval !== null) {
+    return;
+  }
+
+  currentTimeIndicatorInterval = window.setInterval(() => {
+    renderCurrentTimeIndicator();
+  }, 30000);
+}
+
+function renderCurrentTimeIndicator() {
+  calendarGrid.querySelectorAll(".current-time-indicator").forEach((node) => node.remove());
+
+  if (!state.weekData) {
+    return;
+  }
+
+  const now = getCurrentTimeParts(state.weekData.timezone);
+  const currentDayColumn = calendarGrid.querySelector(`[data-iso-date="${now.isoDate}"]`);
+
+  if (!currentDayColumn) {
+    return;
+  }
+
+  const minutesFromStart = now.minutes - state.weekData.grid.startHour * 60;
+  const gridMinutes =
+    (state.weekData.grid.endHour - state.weekData.grid.startHour) * 60;
+
+  if (minutesFromStart < 0 || minutesFromStart > gridMinutes) {
+    return;
+  }
+
+  const indicator = document.createElement("div");
+  indicator.className = "current-time-indicator";
+  indicator.style.top = `${minutesFromStart * (72 / 60)}px`;
+  currentDayColumn.appendChild(indicator);
 }
 
 function renderError(message) {
@@ -308,6 +350,25 @@ function formatTimezoneLabel(timezone) {
   const parts = formatter.formatToParts(new Date());
   const offset = parts.find((part) => part.type === "timeZoneName")?.value || timezone;
   return offset.toUpperCase();
+}
+
+function getCurrentTimeParts(timezone) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  });
+  const parts = formatter.formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return {
+    isoDate: `${values.year}-${values.month}-${values.day}`,
+    minutes: Number(values.hour) * 60 + Number(values.minute)
+  };
 }
 
 function showBannerFromQuery() {

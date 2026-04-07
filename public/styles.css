@@ -305,6 +305,29 @@ textarea {
   inset: 0;
 }
 
+.current-time-indicator {
+  position: absolute;
+  left: -1px;
+  right: 0;
+  height: 2px;
+  background: #d93025;
+  box-shadow: 0 0 0 1px rgba(217, 48, 37, 0.08);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.current-time-indicator::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #d93025;
+  transform: translateY(-50%);
+}
+
 .event-card {
   position: absolute;
   overflow: hidden;
