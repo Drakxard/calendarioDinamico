@@ -51,9 +51,74 @@
         </section>
 
         <section class="calendar-grid" id="calendar-grid">
-          <div class="loading-state">Verificando autenticación...</div>
+          <div class="loading-state">Verificando autenticacion...</div>
+        </section>
+
+        <section class="summary-board" id="summary-board" hidden>
+          <div class="summary-head">
+            <div>
+              <p class="summary-eyebrow">Resumen diario</p>
+              <h2>Carga por materia</h2>
+            </div>
+            <button class="auth-button auth-button--ghost" id="copy-json" type="button" hidden>
+              Copiar JSON
+            </button>
+          </div>
+          <div class="summary-grid" id="summary-grid"></div>
         </section>
       </main>
+    </div>
+
+    <div class="preview-modal" id="preview-modal" hidden>
+      <div class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+        <div class="preview-heading">
+          <div>
+            <p class="summary-eyebrow">Vista previa</p>
+            <h2 id="preview-title">Semana importada desde JSON</h2>
+            <p class="preview-note">
+              Pega otro JSON con Ctrl+V para reemplazar esta vista previa.
+            </p>
+          </div>
+          <button
+            class="nav-button preview-close"
+            id="preview-close"
+            type="button"
+            aria-label="Cerrar vista previa"
+          >
+            &times;
+          </button>
+        </div>
+
+        <section class="status-banner preview-banner" id="preview-message" hidden></section>
+
+        <div class="calendar-card preview-card">
+          <section class="calendar-header">
+            <div class="timezone-label" id="preview-timezone-label">GMT-03</div>
+            <div class="header-days" id="preview-header-days"></div>
+          </section>
+
+          <section class="calendar-grid" id="preview-calendar-grid"></section>
+
+          <section class="summary-board" id="preview-summary-board">
+            <div class="summary-head">
+              <div>
+                <p class="summary-eyebrow">Resumen diario</p>
+                <h2>Horas por materia</h2>
+              </div>
+            </div>
+            <div class="summary-grid" id="preview-summary-grid"></div>
+          </section>
+        </div>
+
+        <div class="preview-actions">
+          <button class="auth-button auth-button--ghost" id="preview-cancel" type="button">
+            Cancelar
+          </button>
+          <button class="auth-button auth-button--primary" id="preview-confirm" type="button">
+            Confirmar
+          </button>
+        </div>
+      </div>
     </div>
 
     <template id="hour-label-template">

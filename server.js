@@ -35,7 +35,18 @@ const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const R2_ENDPOINT = process.env.R2_ENDPOINT;
 
 const TOKEN_OBJECT_KEY = "oauth/google-calendar.json";
+const MANAGED_EVENT_SOURCE = "calendario-dinamico";
+const MANAGED_EVENT_SCHEDULE_TYPE = "weekly-template";
 const DAY_NAMES = ["DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB"];
+const DAY_EXPORT_NAMES = [
+  "Domingo",
+  "Lunes",
+  "Martes",
+  "Mi\u00E9rcoles",
+  "Jueves",
+  "Viernes",
+  "S\u00E1bado"
+];
 const GRID_START_HOUR = 8;
 const GRID_END_HOUR = 23;
 const GOOGLE_COLORS = {
@@ -191,6 +202,25 @@ app.get("/api/week-events", async (req, res) => {
     const statusCode = error.statusCode || 500;
     res.status(statusCode).json({
       error: error.message || "No se pudieron cargar los eventos."
+    });
+  }
+});
+
+app.post("/api/week-template/apply", async (req, res) => {
+  try {
+    ensureOAuthConfig();
+    ensureR2Config();
+
+    const oauthClient = await requireAuthenticatedClient(req);
+    const weekStart = parseRequestedWeekStart(req.query.weekStart);
+    const template = validateWeeklyTemplatePayload(req.body);
+    const result = await replaceManagedWeeklyTemplate(oauthClient, weekStart, template);
+
+    res.json(result);
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({
+      error: error.message || "No se pudo aplicar la plantilla semanal."
     });
   }
 });
@@ -714,6 +744,218 @@ function buildOverlapClusters(events) {
   }
 
   return clusters;
+}
+
+function parseRequestedWeekStart(value) {
+  if (!value || typeof value !== "string") {
+    const error = new Error("Falta el parametro weekStart.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const weekStart = DateTime.fromISO(value, { zone: TIMEZONE }).startOf("day");
+  if (!weekStart.isValid || weekStart.toISODate() !== value) {
+    const error = new Error("weekStart debe tener formato YYYY-MM-DD.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return weekStart;
+}
+
+function validateWeeklyTemplatePayload(payload) {
+  if (!payload || Array.isArray(payload) || typeof payload !== "object") {
+    const error = new Error("La plantilla semanal debe ser un objeto JSON.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const keys = Object.keys(payload);
+  if (keys.length !== DAY_EXPORT_NAMES.length) {
+    const error = new Error("La plantilla debe incluir exactamente Domingo a Sabado.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  for (const key of keys) {
+    if (!DAY_EXPORT_NAMES.includes(key)) {
+      const error = new Error(`La clave "${key}" no es valida para la plantilla semanal.`);
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+
+  return Object.fromEntries(
+    DAY_EXPORT_NAMES.map((dayName) => {
+      if (!Object.prototype.hasOwnProperty.call(payload, dayName)) {
+        const error = new Error(`Falta la clave "${dayName}" en la plantilla semanal.`);
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const blocks = payload[dayName];
+      if (!Array.isArray(blocks)) {
+        const error = new Error(`"${dayName}" debe ser un arreglo de bloques.`);
+        error.statusCode = 400;
+        throw error;
+      }
+
+      return [
+        dayName,
+        blocks.map((block, blockIndex) => normalizeTemplateBlock(block, dayName, blockIndex))
+      ];
+    })
+  );
+}
+
+function normalizeTemplateBlock(block, dayName, blockIndex) {
+  if (!block || Array.isArray(block) || typeof block !== "object") {
+    const error = new Error(`El bloque ${blockIndex + 1} de ${dayName} no es valido.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const materia = String(block.materia || "").trim();
+  const inicio = String(block.inicio || "").trim();
+  const fin = String(block.fin || "").trim();
+
+  if (!materia) {
+    const error = new Error(`El bloque ${blockIndex + 1} de ${dayName} necesita "materia".`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!isValidTimeLabel(inicio) || !isValidTimeLabel(fin)) {
+    const error = new Error(
+      `El bloque ${blockIndex + 1} de ${dayName} debe usar horarios en formato HH:mm.`
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (timeLabelToMinutes(fin) <= timeLabelToMinutes(inicio)) {
+    const error = new Error(
+      `El bloque ${blockIndex + 1} de ${dayName} debe terminar despues de empezar.`
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    materia,
+    inicio,
+    fin
+  };
+}
+
+function isValidTimeLabel(value) {
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+}
+
+function timeLabelToMinutes(value) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function timeLabelToParts(value) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return { hours, minutes };
+}
+
+async function replaceManagedWeeklyTemplate(oauthClient, weekStart, template) {
+  const calendar = google.calendar({ version: "v3", auth: oauthClient });
+  const managedEvents = await listManagedRecurringEvents(calendar);
+
+  for (const event of managedEvents) {
+    await calendar.events.delete({
+      calendarId: GOOGLE_CALENDAR_ID,
+      eventId: event.id,
+      sendUpdates: "none"
+    });
+  }
+
+  let createdCount = 0;
+  for (const [dayIndex, dayName] of DAY_EXPORT_NAMES.entries()) {
+    for (const block of template[dayName]) {
+      await calendar.events.insert({
+        calendarId: GOOGLE_CALENDAR_ID,
+        sendUpdates: "none",
+        requestBody: buildManagedRecurringEvent(weekStart, dayIndex, block)
+      });
+      createdCount += 1;
+    }
+  }
+
+  return {
+    ok: true,
+    deletedCount: managedEvents.length,
+    createdCount
+  };
+}
+
+async function listManagedRecurringEvents(calendar) {
+  const managedEvents = [];
+  let pageToken;
+
+  do {
+    const response = await calendar.events.list({
+      calendarId: GOOGLE_CALENDAR_ID,
+      singleEvents: false,
+      showDeleted: false,
+      maxResults: 2500,
+      pageToken,
+      privateExtendedProperty: [
+        `managedBy=${MANAGED_EVENT_SOURCE}`,
+        `scheduleType=${MANAGED_EVENT_SCHEDULE_TYPE}`
+      ]
+    });
+
+    managedEvents.push(
+      ...(response.data.items || []).filter(
+        (item) => Array.isArray(item.recurrence) && item.recurrence.length > 0
+      )
+    );
+    pageToken = response.data.nextPageToken;
+  } while (pageToken);
+
+  return managedEvents;
+}
+
+function buildManagedRecurringEvent(weekStart, dayIndex, block) {
+  const dayDate = weekStart.plus({ days: dayIndex });
+  const startParts = timeLabelToParts(block.inicio);
+  const endParts = timeLabelToParts(block.fin);
+  const start = dayDate.set({
+    hour: startParts.hours,
+    minute: startParts.minutes,
+    second: 0,
+    millisecond: 0
+  });
+  const end = dayDate.set({
+    hour: endParts.hours,
+    minute: endParts.minutes,
+    second: 0,
+    millisecond: 0
+  });
+
+  return {
+    summary: block.materia,
+    start: {
+      dateTime: start.toISO({ suppressMilliseconds: true }),
+      timeZone: TIMEZONE
+    },
+    end: {
+      dateTime: end.toISO({ suppressMilliseconds: true }),
+      timeZone: TIMEZONE
+    },
+    recurrence: ["RRULE:FREQ=WEEKLY"],
+    extendedProperties: {
+      private: {
+        managedBy: MANAGED_EVENT_SOURCE,
+        scheduleType: MANAGED_EVENT_SCHEDULE_TYPE
+      }
+    }
+  };
 }
 
 function escapeHtml(value) {
