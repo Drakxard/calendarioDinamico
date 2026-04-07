@@ -30,6 +30,10 @@ body {
   font-family: "Manrope", "Segoe UI", sans-serif;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body.modal-open {
   overflow: hidden;
 }
