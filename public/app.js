@@ -26,6 +26,8 @@ const state = {
   isApplyingTemplate: false
 };
 let currentTimeIndicatorInterval = null;
+let previewPasteShortcutArmed = false;
+let previewPasteShortcutTimer = null;
 
 const headerDays = document.getElementById("header-days");
 const rangeTitle = document.getElementById("range-title");
@@ -216,9 +218,11 @@ async function copyCurrentWeekJson() {
 }
 
 function handlePaste(event) {
-  if (!state.isAuthenticated || !state.weekData) {
+  if (!state.isAuthenticated || !state.weekData || !previewPasteShortcutArmed) {
     return;
   }
+
+  disarmPreviewPasteShortcut();
 
   const text = event.clipboardData?.getData("text");
   const result = parseWeeklyTemplateText(text);
@@ -243,8 +247,33 @@ function handlePaste(event) {
 }
 
 function handleKeydown(event) {
+  if (event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "v") {
+    armPreviewPasteShortcut();
+  }
+
   if (event.key === "Escape" && isPreviewModalOpen() && !state.isApplyingTemplate) {
     closePreviewModal();
+  }
+}
+
+function armPreviewPasteShortcut() {
+  previewPasteShortcutArmed = true;
+
+  if (previewPasteShortcutTimer) {
+    window.clearTimeout(previewPasteShortcutTimer);
+  }
+
+  previewPasteShortcutTimer = window.setTimeout(() => {
+    disarmPreviewPasteShortcut();
+  }, 1500);
+}
+
+function disarmPreviewPasteShortcut() {
+  previewPasteShortcutArmed = false;
+
+  if (previewPasteShortcutTimer) {
+    window.clearTimeout(previewPasteShortcutTimer);
+    previewPasteShortcutTimer = null;
   }
 }
 
