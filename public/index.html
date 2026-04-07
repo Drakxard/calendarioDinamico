@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Calendario Semanal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="nav-group">
+          <button class="nav-button" id="previous-week" aria-label="Semana anterior">
+            &lt;
+          </button>
+          <button class="nav-button" id="next-week" aria-label="Semana siguiente">
+            &gt;
+          </button>
+        </div>
+        <div class="title-group">
+          <p class="title-eyebrow">Google Calendar API</p>
+          <h1 id="range-title">Semana</h1>
+        </div>
+      </header>
+
+      <main class="calendar-card">
+        <section class="calendar-header">
+          <div class="timezone-label" id="timezone-label">GMT-03</div>
+          <div class="header-days" id="header-days"></div>
+        </section>
+
+        <section class="all-day-band" id="all-day-band">
+          <div class="all-day-spacer"></div>
+          <div class="all-day-grid" id="all-day-grid"></div>
+        </section>
+
+        <section class="calendar-grid" id="calendar-grid">
+          <div class="loading-state" id="loading-state">Cargando semana...</div>
+        </section>
+      </main>
+    </div>
+
+    <template id="hour-label-template">
+      <div class="hour-label"></div>
+    </template>
+
+    <template id="grid-column-template">
+      <div class="day-column">
+        <div class="day-background"></div>
+        <div class="events-layer"></div>
+      </div>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
