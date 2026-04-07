@@ -1,9 +1,14 @@
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
 const dotenv = require("dotenv");
+const {
+  S3Client,
+  GetObjectCommand,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  NoSuchKey
+} = require("@aws-sdk/client-s3");
 const { google } = require("googleapis");
 const { DateTime } = require("luxon");
 
@@ -20,11 +25,14 @@ const GOOGLE_REDIRECT_URI =
 const GOOGLE_SCOPES =
   process.env.GOOGLE_SCOPES || "https://www.googleapis.com/auth/calendar.events";
 const SESSION_SECRET = process.env.SESSION_SECRET;
-const TOKEN_STORAGE_PATH = path.resolve(
-  process.env.TOKEN_STORAGE_PATH || "./tokens/google-oauth.json"
-);
 const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || "primary";
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_ENDPOINT = process.env.R2_ENDPOINT;
 
+const TOKEN_OBJECT_KEY = "oauth/google-calendar.json";
 const DAY_NAMES = ["DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB"];
 const GRID_START_HOUR = 8;
 const GRID_END_HOUR = 23;
@@ -49,6 +57,8 @@ const FALLBACK_COLORS = [
   { background: "#6d6d6d", accent: "#5d5d5d" }
 ];
 
+const r2Client = createR2Client();
+
 app.use(express.json());
 app.use(
   session({
@@ -63,12 +73,13 @@ app.use(
     }
   })
 );
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static("public"));
 
 app.get("/api/auth/status", async (req, res) => {
   try {
     ensureOAuthConfig();
-    const authenticated = hydrateSessionFromStoredToken(req);
+    ensureR2Config();
+    const authenticated = await hydrateSessionFromStoredToken(req);
 
     res.json({
       authenticated,
@@ -78,7 +89,7 @@ app.get("/api/auth/status", async (req, res) => {
     res.status(500).json({
       authenticated: false,
       configured: false,
-      error: error.message || "La configuración OAuth no es válida."
+      error: error.message || "La configuración OAuth/R2 no es válida."
     });
   }
 });
@@ -86,6 +97,7 @@ app.get("/api/auth/status", async (req, res) => {
 app.get("/auth/google", (req, res, next) => {
   try {
     ensureOAuthConfig();
+    ensureR2Config();
 
     const oauthClient = createOAuthClient();
     const state = crypto.randomBytes(16).toString("hex");
@@ -107,6 +119,7 @@ app.get("/auth/google", (req, res, next) => {
 app.get("/auth/google/callback", async (req, res, next) => {
   try {
     ensureOAuthConfig();
+    ensureR2Config();
 
     if (!req.query.code) {
       const error = new Error("Google no devolvió un código de autorización.");
@@ -129,7 +142,7 @@ app.get("/auth/google/callback", async (req, res, next) => {
       throw error;
     }
 
-    persistTokens(mergeWithStoredTokens(tokens));
+    await saveStoredTokens(await mergeWithStoredTokens(tokens));
     req.session.oauthState = null;
     req.session.authenticated = true;
 
@@ -142,7 +155,7 @@ app.get("/auth/google/callback", async (req, res, next) => {
 app.post("/auth/logout", async (req, res) => {
   try {
     const oauthClient = createOAuthClient();
-    const storedTokens = readStoredTokens();
+    const storedTokens = await loadStoredTokens();
 
     if (storedTokens?.refresh_token) {
       oauthClient.setCredentials(storedTokens);
@@ -153,7 +166,7 @@ app.post("/auth/logout", async (req, res) => {
   } catch (_error) {
     // Ignore revoke errors in local dev logout.
   } finally {
-    deleteStoredTokens();
+    await deleteStoredTokens();
     req.session.destroy(() => {
       res.json({ ok: true });
     });
@@ -163,6 +176,7 @@ app.post("/auth/logout", async (req, res) => {
 app.get("/api/week-events", async (req, res) => {
   try {
     ensureOAuthConfig();
+    ensureR2Config();
 
     const oauthClient = await requireAuthenticatedClient(req);
     const offset = Number.parseInt(req.query.offset, 10) || 0;
@@ -180,7 +194,7 @@ app.get("/api/week-events", async (req, res) => {
 });
 
 app.get("*", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+  res.sendFile("index.html", { root: "public" });
 });
 
 app.use((error, _req, res, _next) => {
@@ -229,6 +243,22 @@ function ensureOAuthConfig() {
   }
 }
 
+function ensureR2Config() {
+  if (
+    !CLOUDFLARE_ACCOUNT_ID ||
+    !R2_BUCKET_NAME ||
+    !R2_ACCESS_KEY_ID ||
+    !R2_SECRET_ACCESS_KEY ||
+    !R2_ENDPOINT
+  ) {
+    const error = new Error(
+      "Faltan variables de R2: CLOUDFLARE_ACCOUNT_ID, R2_BUCKET_NAME, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY o R2_ENDPOINT."
+    );
+    error.statusCode = 500;
+    throw error;
+  }
+}
+
 function createOAuthClient() {
   return new google.auth.OAuth2(
     GOOGLE_CLIENT_ID,
@@ -237,12 +267,27 @@ function createOAuthClient() {
   );
 }
 
-function hydrateSessionFromStoredToken(req) {
+function createR2Client() {
+  if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+    return null;
+  }
+
+  return new S3Client({
+    region: "auto",
+    endpoint: R2_ENDPOINT,
+    credentials: {
+      accessKeyId: R2_ACCESS_KEY_ID,
+      secretAccessKey: R2_SECRET_ACCESS_KEY
+    }
+  });
+}
+
+async function hydrateSessionFromStoredToken(req) {
   if (req.session.authenticated) {
     return true;
   }
 
-  const tokens = readStoredTokens();
+  const tokens = await loadStoredTokens();
   if (!tokens) {
     return false;
   }
@@ -252,7 +297,7 @@ function hydrateSessionFromStoredToken(req) {
 }
 
 async function requireAuthenticatedClient(req) {
-  const tokens = readStoredTokens();
+  const tokens = await loadStoredTokens();
 
   if (!tokens) {
     const error = new Error("No hay una sesión autenticada. Conectá Google Calendar.");
@@ -264,19 +309,23 @@ async function requireAuthenticatedClient(req) {
 
   const oauthClient = createOAuthClient();
   oauthClient.setCredentials(tokens);
-  oauthClient.on("tokens", (nextTokens) => {
+  oauthClient.on("tokens", async (nextTokens) => {
     if (!nextTokens || Object.keys(nextTokens).length === 0) {
       return;
     }
 
-    persistTokens(mergeWithStoredTokens(nextTokens));
+    try {
+      await saveStoredTokens(await mergeWithStoredTokens(nextTokens));
+    } catch (_error) {
+      // Avoid breaking request lifecycle on background refresh persistence failures.
+    }
   });
 
   try {
     await oauthClient.getAccessToken();
     return oauthClient;
   } catch (_error) {
-    deleteStoredTokens();
+    await deleteStoredTokens();
     req.session.authenticated = false;
     const error = new Error(
       "La autorización de Google expiró o no es válida. Volvé a conectar la cuenta."
@@ -286,41 +335,89 @@ async function requireAuthenticatedClient(req) {
   }
 }
 
-function readStoredTokens() {
+async function loadStoredTokens() {
+  ensureR2Client();
+
   try {
-    if (!fs.existsSync(TOKEN_STORAGE_PATH)) {
+    const response = await r2Client.send(
+      new GetObjectCommand({
+        Bucket: R2_BUCKET_NAME,
+        Key: TOKEN_OBJECT_KEY
+      })
+    );
+
+    const body = await response.Body.transformToString();
+    if (!body.trim()) {
       return null;
     }
 
-    const content = fs.readFileSync(TOKEN_STORAGE_PATH, "utf8");
-    if (!content.trim()) {
+    return JSON.parse(body);
+  } catch (error) {
+    if (
+      error instanceof NoSuchKey ||
+      error?.name === "NoSuchKey" ||
+      error?.$metadata?.httpStatusCode === 404
+    ) {
       return null;
     }
 
-    return JSON.parse(content);
-  } catch (_error) {
-    return null;
+    const storageError = new Error(`No se pudo leer la persistencia OAuth en R2. ${error.message}`);
+    storageError.statusCode = 500;
+    throw storageError;
   }
 }
 
-function persistTokens(tokens) {
-  fs.mkdirSync(path.dirname(TOKEN_STORAGE_PATH), { recursive: true });
-  fs.writeFileSync(TOKEN_STORAGE_PATH, JSON.stringify(tokens, null, 2), "utf8");
-}
+async function saveStoredTokens(tokens) {
+  ensureR2Client();
 
-function deleteStoredTokens() {
-  if (fs.existsSync(TOKEN_STORAGE_PATH)) {
-    fs.unlinkSync(TOKEN_STORAGE_PATH);
+  try {
+    await r2Client.send(
+      new PutObjectCommand({
+        Bucket: R2_BUCKET_NAME,
+        Key: TOKEN_OBJECT_KEY,
+        Body: JSON.stringify(tokens, null, 2),
+        ContentType: "application/json"
+      })
+    );
+  } catch (error) {
+    const storageError = new Error(`No se pudo guardar la persistencia OAuth en R2. ${error.message}`);
+    storageError.statusCode = 500;
+    throw storageError;
   }
 }
 
-function mergeWithStoredTokens(incomingTokens) {
-  const existingTokens = readStoredTokens() || {};
+async function deleteStoredTokens() {
+  ensureR2Client();
+
+  try {
+    await r2Client.send(
+      new DeleteObjectCommand({
+        Bucket: R2_BUCKET_NAME,
+        Key: TOKEN_OBJECT_KEY
+      })
+    );
+  } catch (error) {
+    const storageError = new Error(`No se pudo borrar la persistencia OAuth en R2. ${error.message}`);
+    storageError.statusCode = 500;
+    throw storageError;
+  }
+}
+
+async function mergeWithStoredTokens(incomingTokens) {
+  const existingTokens = (await loadStoredTokens()) || {};
   return {
     ...existingTokens,
     ...incomingTokens,
     refresh_token: incomingTokens.refresh_token || existingTokens.refresh_token
   };
+}
+
+function ensureR2Client() {
+  if (!r2Client) {
+    const error = new Error("El cliente de Cloudflare R2 no está configurado.");
+    error.statusCode = 500;
+    throw error;
+  }
 }
 
 function buildWeekRange(offset) {
