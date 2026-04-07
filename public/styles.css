@@ -81,8 +81,9 @@ textarea {
 }
 
 .title-group {
-  margin-left: auto;
-  text-align: right;
+  flex: 1;
+  min-width: 0;
+  text-align: center;
 }
 
 .title-eyebrow {
@@ -98,6 +99,57 @@ textarea {
   margin: 0;
   font-size: clamp(1.2rem, 1rem + 1vw, 1.9rem);
   font-weight: 800;
+}
+
+.auth-group {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 270px;
+}
+
+.auth-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.auth-button:hover {
+  transform: translateY(-1px);
+}
+
+.auth-button--primary {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 12px 28px rgba(26, 115, 232, 0.22);
+}
+
+.auth-button--ghost {
+  border-color: rgba(36, 52, 71, 0.12);
+  background: #fff;
+  color: var(--text);
+  box-shadow: 0 10px 24px rgba(25, 41, 61, 0.06);
+}
+
+.status-banner {
+  margin-bottom: 16px;
+  padding: 14px 18px;
+  border: 1px solid rgba(26, 115, 232, 0.12);
+  border-radius: 18px;
+  background: rgba(26, 115, 232, 0.08);
+  color: #184169;
+  font-size: 0.95rem;
+  font-weight: 700;
 }
 
 .calendar-card {
@@ -295,6 +347,18 @@ textarea {
   color: #b42318;
 }
 
+.empty-state-panel {
+  display: grid;
+  gap: 16px;
+  justify-items: center;
+}
+
+.empty-state-panel p {
+  margin: 0;
+  max-width: 520px;
+  line-height: 1.5;
+}
+
 @media (max-width: 1320px) {
   :root {
     --hour-width: 68px;
@@ -318,7 +382,12 @@ textarea {
 
   .title-group {
     text-align: left;
-    margin-left: 0;
+    flex: unset;
+  }
+
+  .auth-group {
+    justify-content: flex-start;
+    min-width: 0;
   }
 
   .calendar-card {

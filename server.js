@@ -1,6 +1,10 @@
+const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
+const session = require("express-session");
 const dotenv = require("dotenv");
+const { google } = require("googleapis");
 const { DateTime } = require("luxon");
 
 dotenv.config();
@@ -9,8 +13,17 @@ const app = express();
 
 const PORT = Number(process.env.PORT) || 3000;
 const TIMEZONE = process.env.TIMEZONE || "America/Argentina/Buenos_Aires";
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
-const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT_URI =
+  process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/auth/google/callback`;
+const GOOGLE_SCOPES =
+  process.env.GOOGLE_SCOPES || "https://www.googleapis.com/auth/calendar.events";
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const TOKEN_STORAGE_PATH = path.resolve(
+  process.env.TOKEN_STORAGE_PATH || "./tokens/google-oauth.json"
+);
+const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || "primary";
 
 const DAY_NAMES = ["DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB"];
 const GRID_START_HOUR = 8;
@@ -36,15 +49,125 @@ const FALLBACK_COLORS = [
   { background: "#6d6d6d", accent: "#5d5d5d" }
 ];
 
+app.use(express.json());
+app.use(
+  session({
+    name: "calendar-session",
+    secret: SESSION_SECRET || "temporary-dev-secret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 1000 * 60 * 60 * 24 * 7
+    }
+  })
+);
 app.use(express.static(path.join(__dirname, "public")));
+
+app.get("/api/auth/status", async (req, res) => {
+  try {
+    ensureOAuthConfig();
+    const authenticated = hydrateSessionFromStoredToken(req);
+
+    res.json({
+      authenticated,
+      configured: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      authenticated: false,
+      configured: false,
+      error: error.message || "La configuración OAuth no es válida."
+    });
+  }
+});
+
+app.get("/auth/google", (req, res, next) => {
+  try {
+    ensureOAuthConfig();
+
+    const oauthClient = createOAuthClient();
+    const state = crypto.randomBytes(16).toString("hex");
+    req.session.oauthState = state;
+
+    const authorizationUrl = oauthClient.generateAuthUrl({
+      access_type: "offline",
+      prompt: "consent",
+      scope: GOOGLE_SCOPES.split(",").map((scope) => scope.trim()).filter(Boolean),
+      state
+    });
+
+    res.redirect(authorizationUrl);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/auth/google/callback", async (req, res, next) => {
+  try {
+    ensureOAuthConfig();
+
+    if (!req.query.code) {
+      const error = new Error("Google no devolvió un código de autorización.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (!req.query.state || req.query.state !== req.session.oauthState) {
+      const error = new Error("La validación de seguridad del login OAuth falló.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const oauthClient = createOAuthClient();
+    const { tokens } = await oauthClient.getToken(String(req.query.code));
+
+    if (!tokens || (!tokens.refresh_token && !tokens.access_token)) {
+      const error = new Error("Google no devolvió credenciales utilizables.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    persistTokens(mergeWithStoredTokens(tokens));
+    req.session.oauthState = null;
+    req.session.authenticated = true;
+
+    res.redirect("/?auth=connected");
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/auth/logout", async (req, res) => {
+  try {
+    const oauthClient = createOAuthClient();
+    const storedTokens = readStoredTokens();
+
+    if (storedTokens?.refresh_token) {
+      oauthClient.setCredentials(storedTokens);
+      await oauthClient.revokeToken(storedTokens.refresh_token);
+    } else if (storedTokens?.access_token) {
+      await oauthClient.revokeToken(storedTokens.access_token);
+    }
+  } catch (_error) {
+    // Ignore revoke errors in local dev logout.
+  } finally {
+    deleteStoredTokens();
+    req.session.destroy(() => {
+      res.json({ ok: true });
+    });
+  }
+});
 
 app.get("/api/week-events", async (req, res) => {
   try {
-    ensureGoogleConfig();
+    ensureOAuthConfig();
 
+    const oauthClient = await requireAuthenticatedClient(req);
     const offset = Number.parseInt(req.query.offset, 10) || 0;
     const week = buildWeekRange(offset);
-    const items = await fetchGoogleWeekEvents(week.start, week.end);
+    const items = await fetchGoogleWeekEvents(oauthClient, week.start, week.end);
     const normalized = normalizeWeekResponse(items, week);
 
     res.json(normalized);
@@ -60,18 +183,144 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+app.use((error, _req, res, _next) => {
+  const statusCode = error.statusCode || 500;
+  res.status(statusCode).send(`
+    <!DOCTYPE html>
+    <html lang="es">
+      <head>
+        <meta charset="UTF-8" />
+        <title>Error OAuth</title>
+        <style>
+          body { font-family: system-ui, sans-serif; background: #f5f7fb; color: #243447; padding: 32px; }
+          .card { max-width: 720px; margin: 0 auto; background: white; border-radius: 18px; padding: 24px; box-shadow: 0 18px 45px rgba(31,56,88,.10); }
+          h1 { margin-top: 0; }
+          a { color: #1a73e8; text-decoration: none; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>No se pudo completar la autenticación</h1>
+          <p>${escapeHtml(error.message || "Ocurrió un error inesperado.")}</p>
+          <p><a href="/">Volver al calendario</a></p>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
 app.listen(PORT, () => {
   console.log(`Servidor listo en http://localhost:${PORT}`);
 });
 
-function ensureGoogleConfig() {
-  if (!GOOGLE_API_KEY || !GOOGLE_CALENDAR_ID) {
+function ensureOAuthConfig() {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) {
     const error = new Error(
-      "Faltan GOOGLE_API_KEY o GOOGLE_CALENDAR_ID en el archivo .env."
+      "Faltan GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o GOOGLE_REDIRECT_URI en el archivo .env."
     );
     error.statusCode = 500;
     throw error;
   }
+
+  if (!SESSION_SECRET) {
+    const error = new Error("Falta SESSION_SECRET en el archivo .env.");
+    error.statusCode = 500;
+    throw error;
+  }
+}
+
+function createOAuthClient() {
+  return new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
+}
+
+function hydrateSessionFromStoredToken(req) {
+  if (req.session.authenticated) {
+    return true;
+  }
+
+  const tokens = readStoredTokens();
+  if (!tokens) {
+    return false;
+  }
+
+  req.session.authenticated = true;
+  return true;
+}
+
+async function requireAuthenticatedClient(req) {
+  const tokens = readStoredTokens();
+
+  if (!tokens) {
+    const error = new Error("No hay una sesión autenticada. Conectá Google Calendar.");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  req.session.authenticated = true;
+
+  const oauthClient = createOAuthClient();
+  oauthClient.setCredentials(tokens);
+  oauthClient.on("tokens", (nextTokens) => {
+    if (!nextTokens || Object.keys(nextTokens).length === 0) {
+      return;
+    }
+
+    persistTokens(mergeWithStoredTokens(nextTokens));
+  });
+
+  try {
+    await oauthClient.getAccessToken();
+    return oauthClient;
+  } catch (_error) {
+    deleteStoredTokens();
+    req.session.authenticated = false;
+    const error = new Error(
+      "La autorización de Google expiró o no es válida. Volvé a conectar la cuenta."
+    );
+    error.statusCode = 401;
+    throw error;
+  }
+}
+
+function readStoredTokens() {
+  try {
+    if (!fs.existsSync(TOKEN_STORAGE_PATH)) {
+      return null;
+    }
+
+    const content = fs.readFileSync(TOKEN_STORAGE_PATH, "utf8");
+    if (!content.trim()) {
+      return null;
+    }
+
+    return JSON.parse(content);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function persistTokens(tokens) {
+  fs.mkdirSync(path.dirname(TOKEN_STORAGE_PATH), { recursive: true });
+  fs.writeFileSync(TOKEN_STORAGE_PATH, JSON.stringify(tokens, null, 2), "utf8");
+}
+
+function deleteStoredTokens() {
+  if (fs.existsSync(TOKEN_STORAGE_PATH)) {
+    fs.unlinkSync(TOKEN_STORAGE_PATH);
+  }
+}
+
+function mergeWithStoredTokens(incomingTokens) {
+  const existingTokens = readStoredTokens() || {};
+  return {
+    ...existingTokens,
+    ...incomingTokens,
+    refresh_token: incomingTokens.refresh_token || existingTokens.refresh_token
+  };
 }
 
 function buildWeekRange(offset) {
@@ -102,31 +351,18 @@ function buildWeekRange(offset) {
   };
 }
 
-async function fetchGoogleWeekEvents(weekStart, weekEnd) {
-  const url = new URL(
-    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(
-      GOOGLE_CALENDAR_ID
-    )}/events`
-  );
+async function fetchGoogleWeekEvents(oauthClient, weekStart, weekEnd) {
+  const calendar = google.calendar({ version: "v3", auth: oauthClient });
+  const response = await calendar.events.list({
+    calendarId: GOOGLE_CALENDAR_ID,
+    singleEvents: true,
+    orderBy: "startTime",
+    timeMin: weekStart.toUTC().toISO(),
+    timeMax: weekEnd.plus({ days: 1 }).startOf("day").toUTC().toISO(),
+    maxResults: 2500
+  });
 
-  url.searchParams.set("key", GOOGLE_API_KEY);
-  url.searchParams.set("singleEvents", "true");
-  url.searchParams.set("orderBy", "startTime");
-  url.searchParams.set("timeMin", weekStart.toUTC().toISO());
-  url.searchParams.set("timeMax", weekEnd.plus({ days: 1 }).startOf("day").toUTC().toISO());
-  url.searchParams.set("maxResults", "2500");
-
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    const details = await response.text();
-    const error = new Error(`Google Calendar API respondió ${response.status}. ${details}`);
-    error.statusCode = 500;
-    throw error;
-  }
-
-  const payload = await response.json();
-  return payload.items || [];
+  return response.data.items || [];
 }
 
 function normalizeWeekResponse(items, week) {
@@ -186,7 +422,10 @@ function normalizeAllDayEvent(item, week) {
   }
 
   const startDayIndex = Math.max(0, Math.floor(clippedStart.diff(week.start, "days").days));
-  const endDayIndex = Math.min(6, Math.floor(clippedEnd.startOf("day").diff(week.start, "days").days));
+  const endDayIndex = Math.min(
+    6,
+    Math.floor(clippedEnd.startOf("day").diff(week.start, "days").days)
+  );
   const color = getEventColor(item);
 
   return {
@@ -221,9 +460,13 @@ function normalizeTimedEvent(item, week, visibleStartMinutes, visibleEndMinutes)
       const segmentStart = clippedStart > cursor ? clippedStart : cursor;
       const segmentEnd = clippedEnd < cursor.endOf("day") ? clippedEnd : cursor.endOf("day");
       const rawStartMinutes = segmentStart.hour * 60 + segmentStart.minute;
-      const rawEndMinutes = segmentEnd.hour * 60 + segmentEnd.minute + (segmentEnd.second > 0 ? 1 : 0);
+      const rawEndMinutes =
+        segmentEnd.hour * 60 + segmentEnd.minute + (segmentEnd.second > 0 ? 1 : 0);
       const startMinutes = Math.max(rawStartMinutes, visibleStartMinutes);
-      const endMinutes = Math.min(Math.max(rawEndMinutes, startMinutes + 30), visibleEndMinutes);
+      const endMinutes = Math.min(
+        Math.max(rawEndMinutes, startMinutes + 30),
+        visibleEndMinutes
+      );
 
       if (endMinutes > visibleStartMinutes && startMinutes < visibleEndMinutes) {
         segments.push({
@@ -320,7 +563,9 @@ function layoutTimedEvents(events) {
     for (const cluster of buildOverlapClusters(dayEvents)) {
       const columns = [];
       for (const event of cluster) {
-        let columnIndex = columns.findIndex((endMinutes) => endMinutes <= event.startMinutes);
+        let columnIndex = columns.findIndex(
+          (endMinutes) => endMinutes <= event.startMinutes
+        );
         if (columnIndex === -1) {
           columnIndex = columns.length;
           columns.push(event.endMinutes);
@@ -370,4 +615,13 @@ function buildOverlapClusters(events) {
   }
 
   return clusters;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }

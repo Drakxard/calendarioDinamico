@@ -1,7 +1,9 @@
 const state = {
   offset: 0,
   isLoading: false,
-  weekData: null
+  weekData: null,
+  isAuthenticated: false,
+  isConfigured: true
 };
 
 const headerDays = document.getElementById("header-days");
@@ -11,16 +13,37 @@ const allDayGrid = document.getElementById("all-day-grid");
 const calendarGrid = document.getElementById("calendar-grid");
 const previousWeekButton = document.getElementById("previous-week");
 const nextWeekButton = document.getElementById("next-week");
+const connectGoogleLink = document.getElementById("connect-google");
+const logoutButton = document.getElementById("logout-button");
+const authGroup = document.getElementById("auth-group");
+const statusBanner = document.getElementById("status-banner");
 const hourLabelTemplate = document.getElementById("hour-label-template");
 const gridColumnTemplate = document.getElementById("grid-column-template");
 
 previousWeekButton.addEventListener("click", () => changeWeek(-1));
 nextWeekButton.addEventListener("click", () => changeWeek(1));
+logoutButton.addEventListener("click", logout);
 
-loadWeek();
+boot();
+
+async function boot() {
+  showBannerFromQuery();
+  await loadAuthStatus();
+
+  if (!state.isConfigured) {
+    return;
+  }
+
+  if (state.isAuthenticated) {
+    await loadWeek();
+    return;
+  }
+
+  renderUnauthenticatedState();
+}
 
 async function changeWeek(direction) {
-  if (state.isLoading) {
+  if (state.isLoading || !state.isAuthenticated) {
     return;
   }
 
@@ -28,9 +51,33 @@ async function changeWeek(direction) {
   await loadWeek();
 }
 
+async function loadAuthStatus() {
+  try {
+    const response = await fetch("/api/auth/status");
+    const payload = await response.json();
+
+    state.isAuthenticated = Boolean(payload.authenticated);
+    state.isConfigured = payload.configured !== false;
+
+    updateButtons();
+    updateAuthControls();
+
+    if (!response.ok) {
+      renderError(payload.error || "La configuración OAuth no es válida.");
+    }
+  } catch (_error) {
+    state.isAuthenticated = false;
+    state.isConfigured = false;
+    updateButtons();
+    updateAuthControls();
+    renderError("No se pudo comprobar el estado de autenticación.");
+  }
+}
+
 async function loadWeek() {
   state.isLoading = true;
   updateButtons();
+  updateAuthControls();
   calendarGrid.innerHTML = `<div class="loading-state">Cargando semana...</div>`;
 
   try {
@@ -38,6 +85,17 @@ async function loadWeek() {
     const payload = await response.json();
 
     if (!response.ok) {
+      if (response.status === 401) {
+        state.isAuthenticated = false;
+        state.weekData = null;
+        updateButtons();
+        updateAuthControls();
+        renderUnauthenticatedState(
+          payload.error || "Necesitás volver a conectar Google Calendar."
+        );
+        return;
+      }
+
       throw new Error(payload.error || "No se pudieron cargar los eventos.");
     }
 
@@ -49,15 +107,48 @@ async function loadWeek() {
   } finally {
     state.isLoading = false;
     updateButtons();
+    updateAuthControls();
+  }
+}
+
+async function logout() {
+  logoutButton.disabled = true;
+
+  try {
+    await fetch("/auth/logout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+
+    state.isAuthenticated = false;
+    state.weekData = null;
+    state.offset = 0;
+    setBanner("Sesión desconectada.", "info");
+    renderUnauthenticatedState();
+  } catch (_error) {
+    setBanner("No se pudo cerrar la sesión.", "error");
+  } finally {
+    updateButtons();
+    updateAuthControls();
   }
 }
 
 function updateButtons() {
-  previousWeekButton.disabled = state.isLoading;
-  nextWeekButton.disabled = state.isLoading;
+  previousWeekButton.disabled = state.isLoading || !state.isAuthenticated;
+  nextWeekButton.disabled = state.isLoading || !state.isAuthenticated;
+}
+
+function updateAuthControls() {
+  authGroup.hidden = !state.isConfigured;
+  connectGoogleLink.hidden = state.isAuthenticated;
+  logoutButton.hidden = !state.isAuthenticated;
+  logoutButton.disabled = state.isLoading;
 }
 
 function renderWeek(data) {
+  clearTransientBanner();
   renderHeader(data);
   renderAllDayBand(data);
   renderTimeGrid(data);
@@ -173,6 +264,25 @@ function renderError(message) {
   calendarGrid.innerHTML = `<div class="error-state">${escapeHtml(message)}</div>`;
 }
 
+function renderUnauthenticatedState(message) {
+  headerDays.innerHTML = "";
+  allDayGrid.innerHTML = "";
+  allDayGrid.style.height = "50px";
+  rangeTitle.textContent = "Calendario semanal";
+  timezoneLabel.textContent = "GMT-03";
+  calendarGrid.innerHTML = `
+    <div class="empty-state">
+      <div class="empty-state-panel">
+        <p>${escapeHtml(
+          message ||
+            "Conectá tu cuenta de Google para cargar los eventos de la semana desde tu calendario principal."
+        )}</p>
+        <a class="auth-button auth-button--primary" href="/auth/google">Conectar Google Calendar</a>
+      </div>
+    </div>
+  `;
+}
+
 function groupByDay(events) {
   const map = new Map();
 
@@ -198,6 +308,45 @@ function formatTimezoneLabel(timezone) {
   const parts = formatter.formatToParts(new Date());
   const offset = parts.find((part) => part.type === "timeZoneName")?.value || timezone;
   return offset.toUpperCase();
+}
+
+function showBannerFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const authState = params.get("auth");
+
+  if (authState === "connected") {
+    setBanner("Google Calendar conectado correctamente.", "info");
+  }
+
+  if (!authState) {
+    return;
+  }
+
+  params.delete("auth");
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}`;
+  window.history.replaceState({}, "", nextUrl);
+}
+
+function clearTransientBanner() {
+  statusBanner.hidden = true;
+  statusBanner.textContent = "";
+}
+
+function setBanner(message, tone) {
+  statusBanner.hidden = false;
+  statusBanner.textContent = message;
+
+  if (tone === "error") {
+    statusBanner.style.background = "rgba(180, 35, 24, 0.08)";
+    statusBanner.style.borderColor = "rgba(180, 35, 24, 0.16)";
+    statusBanner.style.color = "#8d1c13";
+    return;
+  }
+
+  statusBanner.style.background = "rgba(26, 115, 232, 0.08)";
+  statusBanner.style.borderColor = "rgba(26, 115, 232, 0.12)";
+  statusBanner.style.color = "#184169";
 }
 
 function escapeHtml(value) {

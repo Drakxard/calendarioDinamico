@@ -24,10 +24,20 @@
           </button>
         </div>
         <div class="title-group">
-          <p class="title-eyebrow">Google Calendar API</p>
+          <p class="title-eyebrow">Google Calendar OAuth</p>
           <h1 id="range-title">Semana</h1>
         </div>
+        <div class="auth-group" id="auth-group">
+          <a class="auth-button auth-button--primary" id="connect-google" href="/auth/google">
+            Conectar Google Calendar
+          </a>
+          <button class="auth-button auth-button--ghost" id="logout-button" type="button" hidden>
+            Desconectar
+          </button>
+        </div>
       </header>
+
+      <section class="status-banner" id="status-banner" hidden></section>
 
       <main class="calendar-card">
         <section class="calendar-header">
@@ -41,7 +51,7 @@
         </section>
 
         <section class="calendar-grid" id="calendar-grid">
-          <div class="loading-state" id="loading-state">Cargando semana...</div>
+          <div class="loading-state">Verificando autenticación...</div>
         </section>
       </main>
     </div>
