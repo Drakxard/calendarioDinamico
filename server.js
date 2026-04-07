@@ -225,6 +225,23 @@ app.post("/api/week-template/apply", async (req, res) => {
   }
 });
 
+app.post("/api/week-template/clear", async (req, res) => {
+  try {
+    ensureOAuthConfig();
+    ensureR2Config();
+
+    const oauthClient = await requireAuthenticatedClient(req);
+    const result = await clearManagedWeeklyTemplate(oauthClient);
+
+    res.json(result);
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({
+      error: error.message || "No se pudo borrar la semana administrada por la app."
+    });
+  }
+});
+
 app.get("*", (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, "index.html"));
 });
@@ -560,6 +577,7 @@ function normalizeAllDayEvent(item, week) {
   return {
     id: item.id,
     title: item.summary || "(Sin título)",
+    colorId: item.colorId || null,
     startDayIndex,
     endDayIndex,
     span: endDayIndex - startDayIndex + 1,
@@ -602,6 +620,7 @@ function normalizeTimedEvent(item, week, visibleStartMinutes, visibleEndMinutes)
           id: `${item.id}-${cursor.toISODate()}`,
           sourceId: item.id,
           title: item.summary || "(Sin título)",
+          colorId: item.colorId || null,
           start: segmentStart.toISO(),
           end: segmentEnd.toISO(),
           dayIndex,
@@ -841,10 +860,16 @@ function normalizeTemplateBlock(block, dayName, blockIndex) {
     throw error;
   }
 
+  let colorId = null;
+  if (block.colorId !== undefined && block.colorId !== null && String(block.colorId).trim()) {
+    colorId = String(block.colorId).trim();
+  }
+
   return {
     materia,
     inicio,
-    fin
+    fin,
+    colorId
   };
 }
 
@@ -865,6 +890,7 @@ function timeLabelToParts(value) {
 async function replaceManagedWeeklyTemplate(oauthClient, weekStart, template) {
   const calendar = google.calendar({ version: "v3", auth: oauthClient });
   const managedEvents = await listManagedRecurringEvents(calendar);
+  const colorMap = buildManagedEventColorMap(managedEvents);
 
   for (const event of managedEvents) {
     await calendar.events.delete({
@@ -880,7 +906,12 @@ async function replaceManagedWeeklyTemplate(oauthClient, weekStart, template) {
       await calendar.events.insert({
         calendarId: GOOGLE_CALENDAR_ID,
         sendUpdates: "none",
-        requestBody: buildManagedRecurringEvent(weekStart, dayIndex, block)
+        requestBody: buildManagedRecurringEvent(
+          weekStart,
+          dayIndex,
+          block,
+          block.colorId || colorMap.get(normalizeManagedColorKey(block.materia)) || null
+        )
       });
       createdCount += 1;
     }
@@ -890,6 +921,24 @@ async function replaceManagedWeeklyTemplate(oauthClient, weekStart, template) {
     ok: true,
     deletedCount: managedEvents.length,
     createdCount
+  };
+}
+
+async function clearManagedWeeklyTemplate(oauthClient) {
+  const calendar = google.calendar({ version: "v3", auth: oauthClient });
+  const managedEvents = await listManagedRecurringEvents(calendar);
+
+  for (const event of managedEvents) {
+    await calendar.events.delete({
+      calendarId: GOOGLE_CALENDAR_ID,
+      eventId: event.id,
+      sendUpdates: "none"
+    });
+  }
+
+  return {
+    ok: true,
+    deletedCount: managedEvents.length
   };
 }
 
@@ -921,7 +970,25 @@ async function listManagedRecurringEvents(calendar) {
   return managedEvents;
 }
 
-function buildManagedRecurringEvent(weekStart, dayIndex, block) {
+function buildManagedEventColorMap(events) {
+  const colorMap = new Map();
+
+  for (const event of events) {
+    if (!event.summary || !event.colorId) {
+      continue;
+    }
+
+    colorMap.set(normalizeManagedColorKey(event.summary), event.colorId);
+  }
+
+  return colorMap;
+}
+
+function normalizeManagedColorKey(value) {
+  return String(value || "").trim().toLocaleLowerCase("es-AR");
+}
+
+function buildManagedRecurringEvent(weekStart, dayIndex, block, colorId) {
   const dayDate = weekStart.plus({ days: dayIndex });
   const startParts = timeLabelToParts(block.inicio);
   const endParts = timeLabelToParts(block.fin);
@@ -940,6 +1007,7 @@ function buildManagedRecurringEvent(weekStart, dayIndex, block) {
 
   return {
     summary: block.materia,
+    ...(colorId ? { colorId } : {}),
     start: {
       dateTime: start.toISO({ suppressMilliseconds: true }),
       timeZone: TIMEZONE

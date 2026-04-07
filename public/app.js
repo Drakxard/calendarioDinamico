@@ -14,6 +14,19 @@ const FALLBACK_COLORS = [
   { background: "#ff5b1e", accent: "#f24d11" },
   { background: "#6d6d6d", accent: "#5d5d5d" }
 ];
+const GOOGLE_COLORS = {
+  "1": { background: "#7986cb", accent: "#5c6bc0" },
+  "2": { background: "#33b679", accent: "#0f9d58" },
+  "3": { background: "#8e24aa", accent: "#7b1fa2" },
+  "4": { background: "#e67c73", accent: "#d93025" },
+  "5": { background: "#f6bf26", accent: "#f9ab00" },
+  "6": { background: "#f4511e", accent: "#ff5a1f" },
+  "7": { background: "#039be5", accent: "#039be5" },
+  "8": { background: "#616161", accent: "#5f6368" },
+  "9": { background: "#3f51b5", accent: "#3949ab" },
+  "10": { background: "#0b8043", accent: "#188038" },
+  "11": { background: "#d50000", accent: "#c5221f" }
+};
 
 const state = {
   offset: 0,
@@ -23,7 +36,8 @@ const state = {
   isConfigured: true,
   previewWeekData: null,
   previewTemplate: null,
-  isApplyingTemplate: false
+  isApplyingTemplate: false,
+  isClearingTemplate: false
 };
 let currentTimeIndicatorInterval = null;
 let previewPasteShortcutArmed = false;
@@ -40,6 +54,7 @@ const summaryGrid = document.getElementById("summary-grid");
 const previousWeekButton = document.getElementById("previous-week");
 const nextWeekButton = document.getElementById("next-week");
 const connectGoogleLink = document.getElementById("connect-google");
+const clearTemplateButton = document.getElementById("clear-template");
 const logoutButton = document.getElementById("logout-button");
 const copyJsonButton = document.getElementById("copy-json");
 const authGroup = document.getElementById("auth-group");
@@ -81,6 +96,7 @@ const previewView = {
 previousWeekButton.addEventListener("click", () => changeWeek(-1));
 nextWeekButton.addEventListener("click", () => changeWeek(1));
 logoutButton.addEventListener("click", logout);
+clearTemplateButton.addEventListener("click", clearManagedTemplate);
 copyJsonButton.addEventListener("click", copyCurrentWeekJson);
 previewCloseButton.addEventListener("click", () => closePreviewModal());
 previewCancelButton.addEventListener("click", () => closePreviewModal());
@@ -332,26 +348,85 @@ async function confirmPreviewTemplate() {
   }
 }
 
+async function clearManagedTemplate() {
+  if (!state.isAuthenticated || state.isLoading || state.isApplyingTemplate || state.isClearingTemplate) {
+    return;
+  }
+
+  state.isClearingTemplate = true;
+  updateButtons();
+  updateAuthControls();
+
+  try {
+    const response = await fetch("/api/week-template/clear", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+    const payload = await response.json();
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        state.isAuthenticated = false;
+        state.weekData = null;
+        closePreviewModal(true);
+        updateButtons();
+        updateAuthControls();
+        renderUnauthenticatedState(
+          payload.error || "La autorizacion de Google ya no es valida."
+        );
+        return;
+      }
+
+      throw new Error(payload.error || "No se pudo borrar la carga creada por la app.");
+    }
+
+    closePreviewModal(true);
+    await loadWeek();
+    setBanner(`Series borradas: ${payload.deletedCount ?? 0}.`, "info");
+  } catch (error) {
+    setBanner(error.message, "error");
+  } finally {
+    state.isClearingTemplate = false;
+    updateButtons();
+    updateAuthControls();
+    updatePreviewControls();
+  }
+}
+
 function updateButtons() {
-  previousWeekButton.disabled = state.isLoading || !state.isAuthenticated || state.isApplyingTemplate;
-  nextWeekButton.disabled = state.isLoading || !state.isAuthenticated || state.isApplyingTemplate;
+  previousWeekButton.disabled =
+    state.isLoading || !state.isAuthenticated || state.isApplyingTemplate || state.isClearingTemplate;
+  nextWeekButton.disabled =
+    state.isLoading || !state.isAuthenticated || state.isApplyingTemplate || state.isClearingTemplate;
   copyJsonButton.hidden = !state.isAuthenticated;
   copyJsonButton.disabled =
-    state.isLoading || state.isApplyingTemplate || !state.isAuthenticated || !state.weekData;
-  logoutButton.disabled = state.isLoading || state.isApplyingTemplate;
+    state.isLoading ||
+    state.isApplyingTemplate ||
+    state.isClearingTemplate ||
+    !state.isAuthenticated ||
+    !state.weekData;
+  clearTemplateButton.disabled =
+    state.isLoading || state.isApplyingTemplate || state.isClearingTemplate || !state.isAuthenticated;
+  logoutButton.disabled = state.isLoading || state.isApplyingTemplate || state.isClearingTemplate;
 }
 
 function updateAuthControls() {
   authGroup.hidden = !state.isConfigured;
   connectGoogleLink.hidden = state.isAuthenticated;
+  clearTemplateButton.hidden = !state.isAuthenticated;
   logoutButton.hidden = !state.isAuthenticated;
 }
 
 function updatePreviewControls() {
-  previewCancelButton.disabled = state.isApplyingTemplate;
-  previewCloseButton.disabled = state.isApplyingTemplate;
+  previewCancelButton.disabled = state.isApplyingTemplate || state.isClearingTemplate;
+  previewCloseButton.disabled = state.isApplyingTemplate || state.isClearingTemplate;
   previewConfirmButton.disabled =
-    state.isApplyingTemplate || !state.previewTemplate || !state.isAuthenticated;
+    state.isApplyingTemplate ||
+    state.isClearingTemplate ||
+    !state.previewTemplate ||
+    !state.isAuthenticated;
 }
 
 function renderMainWeek(data) {
@@ -640,6 +715,7 @@ function buildWeekDataFromTemplate(template, baseWeekData) {
         id: `preview-${day.isoDate}-${blockIndex}`,
         sourceId: `preview-${day.isoDate}-${blockIndex}`,
         title: block.materia,
+        colorId: block.colorId || null,
         start: `${day.isoDate}T${block.inicio}:00`,
         end: `${day.isoDate}T${block.fin}:00`,
         dayIndex,
@@ -647,7 +723,7 @@ function buildWeekDataFromTemplate(template, baseWeekData) {
         endMinutes,
         durationMinutes: endMinutes - startMinutes,
         displayTime: `${block.inicio} - ${block.fin}`,
-        color: getColorForTitle(block.materia)
+        color: getEventColor(block)
       });
     });
   });
@@ -679,7 +755,8 @@ function buildTemplateFromWeekData(data) {
     template[dayName] = events.map((event) => ({
       materia: event.title,
       inicio: extractTimeLabelFromIso(event.start),
-      fin: extractTimeLabelFromIso(event.end)
+      fin: extractTimeLabelFromIso(event.end),
+      ...(event.colorId ? { colorId: event.colorId } : {})
     }));
   });
 
@@ -761,6 +838,10 @@ function normalizeTemplateBlock(block, dayName, blockIndex) {
   const materia = String(block.materia || "").trim();
   const inicio = String(block.inicio || "").trim();
   const fin = String(block.fin || "").trim();
+  const colorId =
+    block.colorId === undefined || block.colorId === null || String(block.colorId).trim() === ""
+      ? null
+      : String(block.colorId).trim();
 
   if (!materia) {
     throw new Error(`El bloque ${blockIndex + 1} de ${dayName} necesita "materia".`);
@@ -777,7 +858,8 @@ function normalizeTemplateBlock(block, dayName, blockIndex) {
   return {
     materia,
     inicio,
-    fin
+    fin,
+    colorId
   };
 }
 
@@ -988,6 +1070,14 @@ function getCurrentTimeParts(timezone) {
 function getColorForTitle(title) {
   const hash = Array.from(title || "evento").reduce((acc, char) => acc + char.charCodeAt(0), 0);
   return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
+}
+
+function getEventColor(event) {
+  if (event?.colorId && GOOGLE_COLORS[event.colorId]) {
+    return GOOGLE_COLORS[event.colorId];
+  }
+
+  return getColorForTitle(event?.materia || event?.title);
 }
 
 function extractTimeLabelFromIso(value) {

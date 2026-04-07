@@ -164,6 +164,13 @@ textarea {
   box-shadow: 0 10px 24px rgba(25, 41, 61, 0.06);
 }
 
+.auth-button--danger {
+  border-color: rgba(217, 48, 37, 0.18);
+  background: rgba(217, 48, 37, 0.08);
+  color: var(--danger);
+  box-shadow: 0 10px 24px rgba(217, 48, 37, 0.08);
+}
+
 .status-banner {
   margin-bottom: 16px;
   padding: 14px 18px;
