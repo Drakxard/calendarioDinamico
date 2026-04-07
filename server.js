@@ -891,8 +891,44 @@ async function replaceManagedWeeklyTemplate(oauthClient, weekStart, template) {
   const calendar = google.calendar({ version: "v3", auth: oauthClient });
   const managedEvents = await listManagedRecurringEvents(calendar);
   const colorMap = buildManagedEventColorMap(managedEvents);
+  const existingByKey = new Map();
+  const targetItems = [];
 
   for (const event of managedEvents) {
+    const eventKey = buildManagedEventKeyFromExistingEvent(event);
+    if (!eventKey || existingByKey.has(eventKey)) {
+      continue;
+    }
+
+    existingByKey.set(eventKey, event);
+  }
+
+  for (const [dayIndex, dayName] of DAY_EXPORT_NAMES.entries()) {
+    for (const block of template[dayName]) {
+      const colorId =
+        block.colorId || colorMap.get(normalizeManagedColorKey(block.materia)) || null;
+      const normalizedBlock = {
+        ...block,
+        colorId
+      };
+
+      targetItems.push({
+        key: buildManagedEventKeyFromBlock(dayIndex, normalizedBlock),
+        dayIndex,
+        block: normalizedBlock
+      });
+    }
+  }
+
+  const targetKeys = new Set(targetItems.map((item) => item.key));
+  const eventsToDelete = managedEvents.filter((event) => {
+    const eventKey = buildManagedEventKeyFromExistingEvent(event);
+    return !eventKey || !targetKeys.has(eventKey);
+  });
+  const itemsToCreate = targetItems.filter((item) => !existingByKey.has(item.key));
+  const unchangedCount = targetItems.length - itemsToCreate.length;
+
+  for (const event of eventsToDelete) {
     await calendar.events.delete({
       calendarId: GOOGLE_CALENDAR_ID,
       eventId: event.id,
@@ -901,26 +937,26 @@ async function replaceManagedWeeklyTemplate(oauthClient, weekStart, template) {
   }
 
   let createdCount = 0;
-  for (const [dayIndex, dayName] of DAY_EXPORT_NAMES.entries()) {
-    for (const block of template[dayName]) {
-      await calendar.events.insert({
-        calendarId: GOOGLE_CALENDAR_ID,
-        sendUpdates: "none",
-        requestBody: buildManagedRecurringEvent(
-          weekStart,
-          dayIndex,
-          block,
-          block.colorId || colorMap.get(normalizeManagedColorKey(block.materia)) || null
-        )
-      });
-      createdCount += 1;
-    }
+  for (const item of itemsToCreate) {
+    await calendar.events.insert({
+      calendarId: GOOGLE_CALENDAR_ID,
+      sendUpdates: "none",
+      requestBody: buildManagedRecurringEvent(
+        weekStart,
+        item.dayIndex,
+        item.block,
+        item.block.colorId
+      )
+    });
+    createdCount += 1;
   }
 
   return {
     ok: true,
-    deletedCount: managedEvents.length,
-    createdCount
+    deletedCount: eventsToDelete.length,
+    createdCount,
+    unchangedCount,
+    totalTargetCount: targetItems.length
   };
 }
 
@@ -986,6 +1022,47 @@ function buildManagedEventColorMap(events) {
 
 function normalizeManagedColorKey(value) {
   return String(value || "").trim().toLocaleLowerCase("es-AR");
+}
+
+function buildManagedEventKeyFromExistingEvent(event) {
+  if (!event?.summary || !event.start?.dateTime || !event.end?.dateTime) {
+    return null;
+  }
+
+  const start = DateTime.fromISO(event.start.dateTime, { setZone: true }).setZone(TIMEZONE);
+  const end = DateTime.fromISO(event.end.dateTime, { setZone: true }).setZone(TIMEZONE);
+
+  if (!start.isValid || !end.isValid) {
+    return null;
+  }
+
+  return buildManagedEventKey({
+    materia: event.summary,
+    dayIndex: start.weekday % 7,
+    inicio: start.toFormat("HH:mm"),
+    fin: end.toFormat("HH:mm"),
+    colorId: event.colorId || null
+  });
+}
+
+function buildManagedEventKeyFromBlock(dayIndex, block) {
+  return buildManagedEventKey({
+    materia: block.materia,
+    dayIndex,
+    inicio: block.inicio,
+    fin: block.fin,
+    colorId: block.colorId || null
+  });
+}
+
+function buildManagedEventKey({ materia, dayIndex, inicio, fin, colorId }) {
+  return [
+    normalizeManagedColorKey(materia),
+    String(dayIndex),
+    inicio,
+    fin,
+    colorId || ""
+  ].join("|");
 }
 
 function buildManagedRecurringEvent(weekStart, dayIndex, block, colorId) {

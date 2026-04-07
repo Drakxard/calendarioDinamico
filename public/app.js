@@ -335,7 +335,7 @@ async function confirmPreviewTemplate() {
     closePreviewModal(true);
     await loadWeek();
     setBanner(
-      `Semana recurrente actualizada. Series recreadas: ${payload.createdCount ?? 0}.`,
+      `Semana sincronizada. Nuevas: ${payload.createdCount ?? 0}. Borradas: ${payload.deletedCount ?? 0}. Conservadas: ${payload.unchangedCount ?? 0}.`,
       "info"
     );
   } catch (error) {
@@ -602,19 +602,37 @@ function buildDailySummaries(data) {
     }
 
     const dayMap = summaries.get(event.dayIndex);
-    if (!dayMap.has(event.title)) {
-      dayMap.set(event.title, { title: event.title, minutes: 0 });
+    const summaryKey = getSummarySubjectKey(event.title);
+    const summaryTitle = getSummarySubjectTitle(event.title);
+    if (!dayMap.has(summaryKey)) {
+      dayMap.set(summaryKey, { title: summaryTitle, minutes: 0 });
     }
 
-    dayMap.get(event.title).minutes += event.durationMinutes;
+    dayMap.get(summaryKey).minutes += event.durationMinutes;
   }
 
   return new Map(
     Array.from(summaries.entries()).map(([dayIndex, subjects]) => [
       dayIndex,
-      Array.from(subjects.values()).sort((left, right) => right.minutes - left.minutes)
+      Array.from(subjects.values()).sort(
+        (left, right) => right.minutes - left.minutes || left.title.localeCompare(right.title)
+      )
     ])
   );
+}
+
+function getSummarySubjectKey(title) {
+  return normalizeSummarySubjectTitle(title).toLocaleLowerCase("es-AR");
+}
+
+function getSummarySubjectTitle(title) {
+  return normalizeSummarySubjectTitle(title);
+}
+
+function normalizeSummarySubjectTitle(title) {
+  return String(title || "")
+    .replace(/^fase\s+\d+\s*-\s*/i, "")
+    .trim();
 }
 
 function ensureCurrentTimeIndicatorInterval() {
